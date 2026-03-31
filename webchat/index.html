@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenClaw — WebChat</title>
+<style>
+  /* ── Design: terminal-meets-modern, dark by default ── */
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+  :root {
+    --bg:        #0d0f14;
+    --surface:   #161920;
+    --border:    #252830;
+    --text:      #e2e4ea;
+    --muted:     #6b7080;
+    --accent:    #4f8ef7;
+    --accent2:   #2dd4bf;
+    --user-bg:   #1a2744;
+    --agent-bg:  #131820;
+    --danger:    #f87171;
+    --success:   #4ade80;
+    --font-sans: 'IBM Plex Sans', sans-serif;
+    --font-mono: 'IBM Plex Mono', monospace;
+    --radius:    10px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0 }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .logo {
+    font-family: var(--font-mono);
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: -0.5px;
+  }
+  .logo span { color: var(--accent2) }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background .3s;
+    flex-shrink: 0;
+  }
+  .status-dot.connected   { background: var(--success) }
+  .status-dot.connecting  { background: var(--accent); animation: pulse 1s ease infinite }
+  .status-dot.error       { background: var(--danger) }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  .status-text {
+    font-size: 12px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+  }
+  .shard-badge {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--border);
+    padding: 3px 8px;
+    border-radius: 20px;
+  }
+
+  /* ── Auth overlay ── */
+  #auth-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.8);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+    backdrop-filter: blur(4px);
+  }
+  .auth-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px;
+    width: 360px;
+    max-width: 90vw;
+  }
+  .auth-card h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .auth-card p {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 20px;
+    line-height: 1.5;
+  }
+  .auth-card input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    margin-bottom: 12px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  .auth-card input:focus { border-color: var(--accent) }
+  .auth-card button {
+    width: 100%;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: 10px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity .2s;
+  }
+  .auth-card button:hover { opacity: .85 }
+  .auth-error {
+    font-size: 12px;
+    color: var(--danger);
+    margin-top: 8px;
+    display: none;
+  }
+
+  /* ── Messages ── */
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    scroll-behavior: smooth;
+  }
+  #messages::-webkit-scrollbar { width: 4px }
+  #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px }
+
+  .msg {
+    display: flex;
+    flex-direction: column;
+    max-width: 80%;
+    animation: fadeUp .2s ease forwards;
+  }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:none } }
+
+  .msg.user   { align-self: flex-end; align-items: flex-end }
+  .msg.agent  { align-self: flex-start; align-items: flex-start }
+  .msg.system { align-self: center; align-items: center; max-width: 100% }
+
+  .bubble {
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    line-height: 1.6;
+    font-size: 14px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .msg.user  .bubble { background: var(--user-bg);  color: var(--text) }
+  .msg.agent .bubble { background: var(--agent-bg); color: var(--text); border: 1px solid var(--border) }
+  .msg.system .bubble {
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+  }
+
+  .msg-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+    font-family: var(--font-mono);
+    padding: 0 4px;
+  }
+
+  /* Typing indicator */
+  .typing .bubble {
+    display: flex; gap: 5px; align-items: center;
+    background: var(--agent-bg);
+    border: 1px solid var(--border);
+    padding: 14px 18px;
+  }
+  .typing-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+    animation: typingPulse 1.2s ease infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: .2s }
+  .typing-dot:nth-child(3) { animation-delay: .4s }
+  @keyframes typingPulse { 0%,100%{opacity:.3;transform:scale(.8)} 50%{opacity:1;transform:scale(1)} }
+
+  /* Code blocks */
+  .bubble pre {
+    background: #0a0c10;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    margin: 8px 0;
+  }
+
+  /* ── Input bar ── */
+  #input-bar {
+    display: flex;
+    gap: 8px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  #input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    outline: none;
+    resize: none;
+    max-height: 120px;
+    transition: border-color .2s;
+  }
+  #input:focus   { border-color: var(--accent) }
+  #input::placeholder { color: var(--muted) }
+
+  #send-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: 0 18px;
+    font-size: 18px;
+    cursor: pointer;
+    transition: opacity .2s, transform .1s;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  #send-btn:hover   { opacity: .85 }
+  #send-btn:active  { transform: scale(.95) }
+  #send-btn:disabled { opacity: .3; cursor: default }
+
+  .char-count { font-size: 11px; color: var(--muted); align-self: flex-end; padding-bottom: 2px }
+</style>
+</head>
+<body>
+
+<!-- Auth overlay -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <h2>🦞 OpenClaw</h2>
+    <p>Enter your gateway URL and token to connect.</p>
+    <input id="gateway-url" type="text" placeholder="https://openclaw-gateway.your.workers.dev" />
+    <input id="gateway-token" type="password" placeholder="Gateway token" />
+    <button onclick="connect()">Connect</button>
+    <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+
+<!-- Main UI -->
+<header>
+  <div class="logo">open<span>claw</span></div>
+  <div class="status-dot" id="status-dot"></div>
+  <div class="status-text" id="status-text">disconnected</div>
+  <div class="shard-badge" id="shard-badge">shard —</div>
+</header>
+
+<div id="messages">
+  <div class="msg system">
+    <div class="bubble">webchat ready — enter gateway URL and token to connect</div>
+  </div>
+</div>
+
+<div id="input-bar">
+  <textarea id="input" rows="1" placeholder="Message OpenClaw…" disabled></textarea>
+  <span class="char-count" id="char-count"></span>
+  <button id="send-btn" onclick="sendMessage()" disabled>↑</button>
+</div>
+
+<script>
+  let ws         = null
+  let token      = ''
+  let gatewayUrl = ''
+  let keepaliveTimer = null
+
+  // ── Connect ────────────────────────────────────────────────────────────────
+  function connect() {
+    gatewayUrl = document.getElementById('gateway-url').value.trim().replace(/\/$/, '')
+    token      = document.getElementById('gateway-token').value.trim()
+    const err  = document.getElementById('auth-error')
+
+    if (!gatewayUrl || !token) {
+      err.style.display = 'block'
+      err.textContent   = 'Both fields are required.'
+      return
+    }
+
+    err.style.display = 'none'
+    setStatus('connecting', 'connecting…')
+
+    // WebSocket connection to OpenClaw gateway
+    const wsUrl = gatewayUrl
+      .replace(/^https/, 'wss')
+      .replace(/^http/,  'ws')
+
+    ws = new WebSocket(`${wsUrl}/ws`, [], {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+
+    // Some browsers don't support headers in WS constructor
+    // Fall back: send auth as first message after open
+    ws.addEventListener('open', () => {
+      // Send auth handshake
+      ws.send(JSON.stringify({ type: 'auth', token }))
+
+      setStatus('connected', 'connected')
+      document.getElementById('auth-overlay').style.display = 'none'
+      document.getElementById('input').disabled    = false
+      document.getElementById('send-btn').disabled = false
+      document.getElementById('input').focus()
+
+      addMessage('system', 'connected to OpenClaw gateway')
+
+      // Ping keepalive every 5 min to work around CF Containers WS sleep bug
+      keepaliveTimer = setInterval(async () => {
+        try {
+          await fetch(`${gatewayUrl}/health`, {
+            headers: { Authorization: `Bearer ${token}` }
+          })
+        } catch { /* ignore */ }
+      }, 5 * 60 * 1000)
+    })
+
+    ws.addEventListener('message', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        handleIncoming(data)
+      } catch {
+        addMessage('agent', event.data)
+      }
+    })
+
+    ws.addEventListener('close', (event) => {
+      setStatus('error', `disconnected (${event.code})`)
+      clearInterval(keepaliveTimer)
+      addMessage('system', `connection closed — refresh to reconnect`)
+      document.getElementById('input').disabled    = true
+      document.getElementById('send-btn').disabled = true
+    })
+
+    ws.addEventListener('error', () => {
+      setStatus('error', 'connection error')
+    })
+  }
+
+  // ── Handle incoming messages ────────────────────────────────────────────────
+  function handleIncoming(data) {
+    // Remove typing indicator if present
+    const typing = document.getElementById('typing-indicator')
+    if (typing) typing.remove()
+
+    if (data.type === 'message' || data.type === 'response') {
+      addMessage('agent', data.text ?? data.content ?? JSON.stringify(data))
+    } else if (data.type === 'typing') {
+      showTyping()
+    } else if (data.type === 'shard_info') {
+      document.getElementById('shard-badge').textContent = `shard ${data.shard}`
+    } else if (data.type === 'error') {
+      addMessage('system', `⚠ ${data.message}`)
+    } else {
+      // Raw text or unknown — display as agent message
+      addMessage('agent', data.text ?? JSON.stringify(data))
+    }
+  }
+
+  // ── Send message ────────────────────────────────────────────────────────────
+  function sendMessage() {
+    const input = document.getElementById('input')
+    const text  = input.value.trim()
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return
+
+    addMessage('user', text)
+    ws.send(JSON.stringify({ type: 'message', text }))
+    showTyping()
+
+    input.value  = ''
+    input.style.height = 'auto'
+    document.getElementById('char-count').textContent = ''
+  }
+
+  // ── UI helpers ──────────────────────────────────────────────────────────────
+  function addMessage(role, text) {
+    const msgs    = document.getElementById('messages')
+    const div     = document.createElement('div')
+    div.className = `msg ${role}`
+
+    const bubble  = document.createElement('div')
+    bubble.className = 'bubble'
+    // Render code blocks
+    bubble.innerHTML = escapeAndFormat(text)
+
+    const meta    = document.createElement('div')
+    meta.className = 'msg-meta'
+    meta.textContent = new Date().toLocaleTimeString()
+
+    div.appendChild(bubble)
+    if (role !== 'system') div.appendChild(meta)
+    msgs.appendChild(div)
+    msgs.scrollTop = msgs.scrollHeight
+  }
+
+  function showTyping() {
+    const existing = document.getElementById('typing-indicator')
+    if (existing) return
+    const msgs = document.getElementById('messages')
+    const div  = document.createElement('div')
+    div.id     = 'typing-indicator'
+    div.className = 'msg agent typing'
+    div.innerHTML = `<div class="bubble">
+      <div class="typing-dot"></div>
+      <div class="typing-dot"></div>
+      <div class="typing-dot"></div>
+    </div>`
+    msgs.appendChild(div)
+    msgs.scrollTop = msgs.scrollHeight
+  }
+
+  function setStatus(state, label) {
+    const dot  = document.getElementById('status-dot')
+    const text = document.getElementById('status-text')
+    dot.className  = `status-dot ${state}`
+    text.textContent = label
+  }
+
+  function escapeAndFormat(text) {
+    // Escape HTML
+    const escaped = text
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Format ```code``` blocks
+    return escaped.replace(/```[\w]*\n?([\s\S]*?)```/g, '<pre>$1</pre>')
+  }
+
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────────
+  document.getElementById('input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      sendMessage()
+    }
+  })
+
+  document.getElementById('input').addEventListener('input', function() {
+    // Auto-resize textarea
+    this.style.height = 'auto'
+    this.style.height = Math.min(this.scrollHeight, 120) + 'px'
+    // Char count
+    const count = this.value.length
+    const cc = document.getElementById('char-count')
+    cc.textContent = count > 200 ? `${count}` : ''
+  })
+
+  // Pre-fill from URL params (e.g. ?url=...&token=...)
+  const params = new URLSearchParams(location.search)
+  if (params.get('url'))   document.getElementById('gateway-url').value   = params.get('url')
+  if (params.get('token')) document.getElementById('gateway-token').value = params.get('token')
+</script>
+</body>
+</html>

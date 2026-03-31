@@ -1,0 +1,60 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "openclaw-gateway",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-03-27",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  // ── Container definition ───────────────────────────────────────────────────
+  "containers": [
+    {
+      "class_name": "OpenClawContainer",
+      "image": "../container/Dockerfile",
+      "instance_type": "standard-1", // 1 vCPU, 2 GiB RAM — suits OpenClaw
+      "max_instances": 20 // ~300 concurrent users per shard × 20
+    }
+  ],
+  // ── Durable Object (Container is a Durable Object subclass) ───────────────
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "OpenClawContainer",
+        "name": "OPENCLAW"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "OpenClawContainer"
+      ]
+    }
+  ],
+  // ── KV for routing table + rate-limit counters ─────────────────────────────
+  "kv_namespaces": [
+    {
+      "binding": "ROUTING_KV",
+      "id": "d7dd7f3a5f45412bb91ce4a82b1f55d9",
+      "preview_id": "e2bf5ec4e7c140c78594d3041f39a4d9"
+    }
+  ],
+  // ── R2 bucket for OpenClaw state (sessions, memory, workspace) ─────────────
+  "r2_buckets": [
+    {
+      "binding": "STATE_BUCKET",
+      "bucket_name": "openclaw-sessions"
+    }
+  ],
+  // ── Secrets (set via: wrangler secret put <KEY>) ───────────────────────────
+  // OPENCLAW_GATEWAY_TOKEN  — shared token for gateway auth
+  // ANTHROPIC_API_KEY       — LLM provider key
+  // R2_ACCESS_KEY_ID        — R2 API token access key
+  // R2_SECRET_ACCESS_KEY    — R2 API token secret
+  // CF_ACCOUNT_ID           — your Cloudflare account ID
+  // ── Workers Paid plan required for Containers ──────────────────────────────
+  "placement": {
+    "mode": "smart"
+  }
+}
