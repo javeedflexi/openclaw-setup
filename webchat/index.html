@@ -339,6 +339,7 @@
     // Some browsers don't support headers in WS constructor
     // Fall back: send auth as first message after open
     ws.addEventListener('open', () => {
+      // OpenClaw will send a connect.challenge — we respond in onmessage
       // Send auth handshake
       ws.send(JSON.stringify({ type: 'auth', token }))
 
@@ -384,6 +385,17 @@
 
   // ── Handle incoming messages ────────────────────────────────────────────────
   function handleIncoming(data) {
+    // Handle OpenClaw connect.challenge — must respond with token
+    if (data.type === 'event' && data.event === 'connect.challenge') {
+      const nonce = data.payload?.nonce ?? ''
+      ws.send(JSON.stringify({
+        type: 'auth',
+        payload: { token, nonce }
+      }))
+      addMessage('system', 'authenticated with gateway')
+      return
+    }
+
     // Remove typing indicator if present
     const typing = document.getElementById('typing-indicator')
     if (typing) typing.remove()
