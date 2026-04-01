@@ -193,6 +193,8 @@ function fwdHeaders(original: Headers, userId: string, shard: string): Headers {
   const h = new Headers(original)
   h.set('X-OpenClaw-User', userId)
   h.set('X-OpenClaw-Shard', shard)
+  h.set('X-Container-Shard-Id', shard)
+  h.set('X-Worker-Url', 'https://openclaw-gateway.techadmin-ad6.workers.dev')
   h.delete('Authorization')
   return h
 }
