@@ -7,9 +7,9 @@
 //   2. Register webhook: https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://your-worker.dev/webhooks/telegram
 //   3. Add TELEGRAM_BOT_TOKEN to wrangler secrets
 
-import { resolveShardForUser } from '../lib/shard'
-import { getContainer }        from '@cloudflare/containers'
-import type { Env }            from '../worker'
+import { getContainer } from '@cloudflare/containers'
+import { pickContainer } from '../worker'
+import type { Env } from '../worker'
 
 // Telegram Update object (minimal typing — add fields as needed)
 interface TelegramUpdate {
@@ -17,14 +17,14 @@ interface TelegramUpdate {
   message?: {
     message_id: number
     from?: { id: number; username?: string; first_name?: string }
-    chat:  { id: number; type: string }
+    chat: { id: number; type: string }
     text?: string
     photo?: Array<{ file_id: string }>
     document?: { file_id: string; file_name?: string }
-    date:  number
+    date: number
   }
   callback_query?: {
-    id:   string
+    id: string
     from: { id: number }
     data?: string
   }
@@ -32,8 +32,8 @@ interface TelegramUpdate {
 
 export async function handleTelegramWebhook(
   request: Request,
-  env:     Env,
-  ctx:     ExecutionContext,
+  env: Env,
+  ctx: ExecutionContext,
 ): Promise<Response> {
 
   // ── 1. Validate Telegram secret token (set via setWebhook?secret_token=...) ─
@@ -50,7 +50,7 @@ export async function handleTelegramWebhook(
     return new Response('Bad Request', { status: 400 })
   }
 
-  const msg     = update.message
+  const msg = update.message
   const cbQuery = update.callback_query
 
   // Determine the Telegram user ID
@@ -67,8 +67,9 @@ export async function handleTelegramWebhook(
   // Namespace the userId so Telegram and Slack users don't collide in routing
   const userId = `tg-${telegramUserId}`
 
-  // ── 3. Resolve shard ──────────────────────────────────────────────────────
-  const { shardKey } = await resolveShardForUser(userId, env.ROUTING_KV, ctx)
+  // ── 3. Resolve container (use same logic as HTTP API) ─────────────────────
+  // This ensures Telegram messages route to the same container as the saved R2 state
+  const shardKey = pickContainer(userId)  // Returns 'c1', 'c2', or 'c3'
 
   // ── 4. Forward to OpenClaw container ─────────────────────────────────────
   const container = getContainer(env.OPENCLAW, shardKey)
@@ -76,11 +77,11 @@ export async function handleTelegramWebhook(
   // Reconstruct a clean request to the OpenClaw gateway webhook endpoint
   const gatewayUrl = `http://container/webhooks/telegram`
   const fwdRequest = new Request(gatewayUrl, {
-    method:  'POST',
+    method: 'POST',
     headers: {
-      'Content-Type':    'application/json',
-      'X-Bot-Token':     env.OPENCLAW_GATEWAY_TOKEN,
-      'X-User-Id':       userId,
+      'Content-Type': 'application/json',
+      'X-Bot-Token': env.OPENCLAW_GATEWAY_TOKEN,
+      'X-User-Id': userId,
       'X-OpenClaw-Shard': shardKey,
       'X-Telegram-Bot-Token': env.TELEGRAM_BOT_TOKEN,
     },
@@ -101,15 +102,15 @@ export async function handleTelegramWebhook(
 // Call this once after deploy: GET /admin/register-telegram-webhook
 export async function registerTelegramWebhook(
   workerUrl: string,
-  botToken:  string,
-  secret:    string,
+  botToken: string,
+  secret: string,
 ): Promise<{ ok: boolean; description?: string }> {
   const url = `https://api.telegram.org/bot${botToken}/setWebhook`
   const res = await fetch(url, {
-    method:  'POST',
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      url:          `${workerUrl}/webhooks/telegram`,
+      url: `${workerUrl}/webhooks/telegram`,
       secret_token: secret,
       allowed_updates: ['message', 'callback_query', 'inline_query'],
       max_connections: 100,
