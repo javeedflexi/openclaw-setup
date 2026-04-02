@@ -1,4 +1,8 @@
-// worker.ts — OpenClaw Gateway Worker with R2 state persistence
+// worker.ts — OpenClaw Gateway Worker
+// R2 persistence uses rclone inside the container (same as moltbot-sandbox).
+// The Worker passes R2 credentials to the container via this.envVars in the
+// OpenClawContainer constructor — the container then syncs directly to R2
+// using the S3-compatible API, with no HTTP round-trip through the Worker.
 import { Container, getContainer } from '@cloudflare/containers'
 import { checkRateLimit } from './lib/shard'
 import { authenticate, unauthorizedResponse } from './lib/auth'
@@ -11,12 +15,16 @@ export interface Env {
   OPENCLAW: DurableObjectNamespace
   ROUTING_KV: KVNamespace
   STATE_BUCKET: R2Bucket
+  // Worker secrets — set via `wrangler secret put`
   OPENCLAW_GATEWAY_TOKEN: string
   ANTHROPIC_API_KEY: string
+  OPENCLAW_WORKER_URL: string
+  // R2 credentials forwarded to the container for direct rclone access
   R2_ACCESS_KEY_ID: string
   R2_SECRET_ACCESS_KEY: string
   CF_ACCOUNT_ID: string
-  OPENCLAW_WORKER_URL: string
+  R2_BUCKET_NAME?: string          // defaults to 'openclaw-sessions'
+  // Chat channel tokens
   TELEGRAM_BOT_TOKEN: string
   TELEGRAM_WEBHOOK_SECRET: string
   SLACK_SIGNING_SECRET: string
@@ -93,44 +101,7 @@ export default {
       const auth = authenticate(request, env.OPENCLAW_GATEWAY_TOKEN)
       if (!auth.ok) return withCors(unauthorizedResponse(auth.reason))
 
-      // R2 state save — called by container on SIGTERM
-      if (path === '/admin/r2/save') {
-        const shard = url.searchParams.get('shard') ?? 'c1'
-        const body = await request.arrayBuffer()
-        if (body.byteLength === 0) {
-          return withCors(Response.json({ ok: false, error: 'empty body' }, { status: 400 }))
-        }
-        await env.STATE_BUCKET.put(
-          `state/${shard}/state.tar.gz`,
-          body,
-          { httpMetadata: { contentType: 'application/gzip' } }
-        )
-        console.log(`[R2] Saved state for shard ${shard}: ${body.byteLength} bytes`)
-        return withCors(Response.json({ ok: true, shard, bytes: body.byteLength }))
-      }
-
-      // R2 state restore — called by container on startup
-      if (path === '/admin/r2/restore') {
-        const shard = url.searchParams.get('shard') ?? 'c1'
-        const object = await env.STATE_BUCKET.get(`state/${shard}/state.tar.gz`)
-        if (!object) {
-          console.log(`[R2] No state found for shard ${shard}`)
-          return new Response(null, { status: 404 })
-        }
-        console.log(`[R2] Restoring state for shard ${shard}`)
-        return new Response(object.body, {
-          headers: { 'Content-Type': 'application/gzip' }
-        })
-      }
-
-      // R2 state delete — manual reset
-      if (path === '/admin/r2/delete') {
-        const shard = url.searchParams.get('shard') ?? 'c1'
-        await env.STATE_BUCKET.delete(`state/${shard}/state.tar.gz`)
-        return withCors(Response.json({ ok: true, shard, deleted: true }))
-      }
-
-      // R2 state list — show all saved shards
+      // R2 state list — show all saved shards (uses Worker-side STATE_BUCKET binding)
       if (path === '/admin/r2/list') {
         const list = await env.STATE_BUCKET.list({ prefix: 'state/' })
         return withCors(Response.json({
@@ -140,12 +111,19 @@ export default {
         }))
       }
 
+      // R2 state delete — manual reset for a shard
+      if (path === '/admin/r2/delete') {
+        const shard = url.searchParams.get('shard') ?? 'c1'
+        // Delete all objects under state/<shard>/
+        const list = await env.STATE_BUCKET.list({ prefix: `state/${shard}/` })
+        await Promise.all(list.objects.map(o => env.STATE_BUCKET.delete(o.key)))
+        return withCors(Response.json({ ok: true, shard, deleted: list.objects.length }))
+      }
+
       return withCors(await handleAdmin(request, env, ctx))
     }
 
     // ── WebSocket — proxy straight through to container ───────────────────────
-    // Control UI handles its own auth over the WebSocket protocol.
-    // Must use getContainer() not env.OPENCLAW.get() for WS upgrade support.
     if (isWS) {
       const container = getContainer(env.OPENCLAW, 'c1')
       return container.fetch(new Request(
@@ -178,10 +156,34 @@ export default {
 }
 
 // ── OpenClawContainer ─────────────────────────────────────────────────────────
+// Mirrors moltbot-sandbox's buildEnvVars() pattern: Worker secrets are passed
+// into the container process via this.envVars so the container can configure
+// rclone and sync directly to R2 without routing through the Worker.
 export class OpenClawContainer extends Container {
   defaultPort = 18789
   sleepAfter = '4h'
   enableInternet = true
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+
+    const vars: Record<string, string> = {}
+
+    if (env.ANTHROPIC_API_KEY)    vars.ANTHROPIC_API_KEY    = env.ANTHROPIC_API_KEY
+    if (env.OPENCLAW_GATEWAY_TOKEN) vars.OPENCLAW_GATEWAY_TOKEN = env.OPENCLAW_GATEWAY_TOKEN
+    if (env.OPENCLAW_WORKER_URL)  vars.OPENCLAW_WORKER_URL  = env.OPENCLAW_WORKER_URL
+
+    // R2 credentials for rclone — same secrets as moltbot uses
+    if (env.R2_ACCESS_KEY_ID)     vars.R2_ACCESS_KEY_ID     = env.R2_ACCESS_KEY_ID
+    if (env.R2_SECRET_ACCESS_KEY) vars.R2_SECRET_ACCESS_KEY = env.R2_SECRET_ACCESS_KEY
+    if (env.CF_ACCOUNT_ID)        vars.CF_ACCOUNT_ID        = env.CF_ACCOUNT_ID
+    vars.R2_BUCKET_NAME = env.R2_BUCKET_NAME ?? 'openclaw-sessions'
+
+    // Tell the container which shard it is so rclone uses the right R2 path
+    vars.CONTAINER_SHARD_ID = ctx.id.name ?? 'c1'
+
+    this.envVars = vars
+  }
 
   override onStart() { console.log('[Container] started') }
   override onStop() { console.log('[Container] stopped') }
@@ -194,7 +196,6 @@ function fwdHeaders(original: Headers, userId: string, shard: string): Headers {
   h.set('X-OpenClaw-User', userId)
   h.set('X-OpenClaw-Shard', shard)
   h.set('X-Container-Shard-Id', shard)
-  h.set('X-Worker-Url', 'https://openclaw-gateway.techadmin-ad6.workers.dev')
   h.delete('Authorization')
   return h
 }

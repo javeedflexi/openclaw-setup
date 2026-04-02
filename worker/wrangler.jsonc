@@ -39,7 +39,8 @@
   "r2_buckets": [
     {
       "binding": "STATE_BUCKET",
-      "bucket_name": "openclaw-sessions"
+      "bucket_name": "openclaw-sessions",
+      "preview_bucket_name": "openclaw-sessions-preview"
     }
   ],
   "placement": {

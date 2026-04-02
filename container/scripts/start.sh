@@ -1,4 +1,15 @@
 #!/usr/bin/env sh
+# start.sh — OpenClaw container entrypoint
+#
+# R2 persistence mirrors moltbot-sandbox:
+#   - On start:    rclone copy r2:<bucket>/state/<shard>/ → STATE_DIR
+#   - On shutdown: rclone sync STATE_DIR → r2:<bucket>/state/<shard>/
+#
+# Required env vars (injected by OpenClawContainer.envVars from Worker secrets):
+#   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, CF_ACCOUNT_ID, R2_BUCKET_NAME
+#   OPENCLAW_GATEWAY_TOKEN, ANTHROPIC_API_KEY
+#
+set -eu
 
 echo "[start] OpenClaw starting — shard=${CONTAINER_SHARD_ID:-c1}"
 
@@ -6,34 +17,51 @@ TOKEN="${OPENCLAW_GATEWAY_TOKEN:-changeme}"
 AKEY="${ANTHROPIC_API_KEY:-}"
 STATE_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
 SHARD="${CONTAINER_SHARD_ID:-c1}"
-WORKER_URL="${OPENCLAW_WORKER_URL:-https://openclaw-gateway.techadmin-ad6.workers.dev}"
+BUCKET="${R2_BUCKET_NAME:-openclaw-sessions}"
+RCLONE_CONF="${HOME}/.config/rclone/rclone.conf"
+RCLONE_FLAGS="--transfers=8 --fast-list --s3-no-check-bucket"
 
 mkdir -p "${STATE_DIR}/workspace"
 
-# ── Restore state from R2 — max 5 seconds ────────────────────────────────────
-if [ -n "${WORKER_URL}" ]; then
-  echo "[start] Checking R2 for saved state..."
-  HTTP_STATUS=$(curl -sf \
-    --max-time 5 \
-    -o /tmp/state.tar.gz \
-    -w "%{http_code}" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    "${WORKER_URL}/admin/r2/restore?shard=${SHARD}" 2>/dev/null)
-
-  if [ "${HTTP_STATUS}" = "200" ] && [ -s /tmp/state.tar.gz ]; then
-    echo "[start] Restoring state from R2..."
-    tar -xzf /tmp/state.tar.gz -C "${STATE_DIR}" 2>/dev/null \
-      && echo "[start] State restored OK" \
-      || echo "[start] State restore failed (continuing fresh)"
-    rm -f /tmp/state.tar.gz
-  else
-    echo "[start] No saved state — fresh start"
+# ── Configure rclone for R2 (mirrors moltbot-sandbox ensureRcloneConfig) ──────
+configure_rclone() {
+  if [ -z "${R2_ACCESS_KEY_ID:-}" ] || [ -z "${R2_SECRET_ACCESS_KEY:-}" ] || [ -z "${CF_ACCOUNT_ID:-}" ]; then
+    echo "[r2] R2 credentials not set — persistence disabled"
+    return 1
   fi
+  mkdir -p "$(dirname "${RCLONE_CONF}")"
+  cat > "${RCLONE_CONF}" << RCLONE_EOF
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = ${R2_ACCESS_KEY_ID}
+secret_access_key = ${R2_SECRET_ACCESS_KEY}
+endpoint = https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com
+acl = private
+no_check_bucket = true
+RCLONE_EOF
+  echo "[r2] rclone configured for bucket: ${BUCKET}"
+  return 0
+}
+
+R2_ENABLED=0
+configure_rclone && R2_ENABLED=1
+
+# ── Restore state from R2 on startup ─────────────────────────────────────────
+if [ "${R2_ENABLED}" = "1" ]; then
+  echo "[r2] Restoring state from r2:${BUCKET}/state/${SHARD}/ ..."
+  rclone copy \
+    "r2:${BUCKET}/state/${SHARD}/" \
+    "${STATE_DIR}/" \
+    ${RCLONE_FLAGS} \
+    --exclude "*.lock" --exclude "*.tmp" \
+    2>&1 | sed 's/^/[rclone restore] /' || echo "[r2] Restore failed or no state found — starting fresh"
 fi
 
-# ── Write gateway config with API key in env section ─────────────────────────
-echo "[start] Writing gateway config..."
-cat > "${STATE_DIR}/openclaw.json" << CONF
+# ── Write gateway config (only if not already restored from R2) ───────────────
+if [ ! -f "${STATE_DIR}/openclaw.json" ]; then
+  echo "[start] Writing gateway config (fresh start)..."
+  cat > "${STATE_DIR}/openclaw.json" << CONF
 {
   "env": {
     "ANTHROPIC_API_KEY": "${AKEY}"
@@ -65,8 +93,11 @@ cat > "${STATE_DIR}/openclaw.json" << CONF
   }
 }
 CONF
+else
+  echo "[start] Gateway config restored from R2 — skipping overwrite"
+fi
 
-# ── Write auth-profiles.json with correct format ─────────────────────────────
+# ── Write auth-profiles.json if not already present ───────────────────────────
 if [ ! -f "${STATE_DIR}/agents/main/agent/auth-profiles.json" ]; then
   echo "[start] Writing auth-profiles.json..."
   mkdir -p "${STATE_DIR}/agents/main/agent"
@@ -82,40 +113,31 @@ if [ ! -f "${STATE_DIR}/agents/main/agent/auth-profiles.json" ]; then
   }
 }
 AUTHEOF
-  echo "[start] Auth profile written"
 else
   echo "[start] Agent auth already exists — skipping"
 fi
 
-# ── Save state to R2 on shutdown ──────────────────────────────────────────────
+# ── Save state to R2 on shutdown (mirrors moltbot-sandbox syncToR2) ───────────
 save_state() {
-  echo "[shutdown] Saving state to R2..."
-  if [ -n "${WORKER_URL}" ]; then
-    tar -czf /tmp/state.tar.gz \
-      -C "${STATE_DIR}" \
-      --exclude="./workspace" \
-      --exclude="./*.log" \
-      --exclude="./logs" \
-      . 2>/dev/null
-    if [ -s /tmp/state.tar.gz ]; then
-      curl -sf --max-time 10 -X POST \
-        -H "Authorization: Bearer ${TOKEN}" \
-        -H "Content-Type: application/octet-stream" \
-        --data-binary @/tmp/state.tar.gz \
-        "${WORKER_URL}/admin/r2/save?shard=${SHARD}" 2>/dev/null \
-        && echo "[shutdown] State saved to R2 OK" \
-        || echo "[shutdown] State save failed"
-      rm -f /tmp/state.tar.gz
-    fi
+  if [ "${R2_ENABLED}" = "1" ]; then
+    echo "[shutdown] Syncing state to r2:${BUCKET}/state/${SHARD}/ ..."
+    rclone sync \
+      "${STATE_DIR}/" \
+      "r2:${BUCKET}/state/${SHARD}/" \
+      ${RCLONE_FLAGS} \
+      --exclude "*.lock" --exclude "*.log" --exclude "*.tmp" --exclude ".git/**" \
+      2>&1 | sed 's/^/[rclone save] /' \
+      && echo "[shutdown] State saved to R2 OK" \
+      || echo "[shutdown] R2 sync failed"
   else
-    echo "[shutdown] No WORKER_URL — skipping R2 save"
+    echo "[shutdown] R2 not configured — skipping save"
   fi
   exit 0
 }
 
 trap save_state TERM INT
 
-# ── Start gateway ─────────────────────────────────────────────────────────────
+# ── Start gateway ──────────────────────────────────────────────────────────────
 echo "[start] Starting OpenClaw gateway on :18789..."
 exec node /app/dist/index.js gateway \
   --port 18789 \
